@@ -25,9 +25,9 @@ type Reader interface {
 	ListAssets(ctx context.Context) ([]coverage.Asset, error)
 	GetAsset(ctx context.Context, sac string) (coverage.Asset, error)
 	LatestSupply(ctx context.Context, sac string) (*coverage.Supply, error)
-	SupplyHistory(ctx context.Context, sac string, limit int) ([]coverage.Supply, error)
+	SupplyHistory(ctx context.Context, sac string, limit int, before *uint32) ([]coverage.Supply, *uint32, error)
 	LatestReports(ctx context.Context, sac string) (map[uint32]coverage.Report, error)
-	ReportHistory(ctx context.Context, sac string, limit int) ([]coverage.Report, error)
+	ReportHistory(ctx context.Context, sac string, limit int, before *uint32) ([]coverage.Report, *uint32, error)
 	Reporters(ctx context.Context) ([]coverage.Reporter, error)
 	Breakdown(ctx context.Context, hash string) ([]byte, error)
 	Progress(ctx context.Context, name string) (store.Progress, error)
@@ -59,6 +59,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/assets/{sac}", s.getAsset)
 	mux.HandleFunc("GET /v1/assets/{sac}/supply", s.supplyHistory)
 	mux.HandleFunc("GET /v1/assets/{sac}/reports", s.reportHistory)
+	mux.HandleFunc("GET /v1/assets/{sac}/covered", s.covered)
 	mux.HandleFunc("GET /v1/reporters", s.reporters)
 	mux.HandleFunc("GET /v1/breakdowns/{hash}", s.breakdown)
 	return s.cors(mux)
@@ -256,7 +257,11 @@ func (s *Server) supplyHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	list, err := s.Store.SupplyHistory(r.Context(), r.PathValue("sac"), limit)
+	before, ok := parseBefore(w, r)
+	if !ok {
+		return
+	}
+	list, nextBefore, err := s.Store.SupplyHistory(r.Context(), r.PathValue("sac"), limit, before)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -265,7 +270,7 @@ func (s *Server) supplyHistory(w http.ResponseWriter, r *http.Request) {
 	for i := range list {
 		out = append(out, toSupply(&list[i]))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"supply": out})
+	writeJSON(w, http.StatusOK, map[string]any{"supply": out, "next_before": nextBefore})
 }
 
 func (s *Server) reportHistory(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +278,11 @@ func (s *Server) reportHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	list, err := s.Store.ReportHistory(r.Context(), r.PathValue("sac"), limit)
+	before, ok := parseBefore(w, r)
+	if !ok {
+		return
+	}
+	list, nextBefore, err := s.Store.ReportHistory(r.Context(), r.PathValue("sac"), limit, before)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -282,7 +291,34 @@ func (s *Server) reportHistory(w http.ResponseWriter, r *http.Request) {
 	for _, rep := range list {
 		out = append(out, toReport(rep))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"reports": out})
+	writeJSON(w, http.StatusOK, map[string]any{"reports": out, "next_before": nextBefore})
+}
+
+func (s *Server) covered(w http.ResponseWriter, r *http.Request) {
+	minBps, ok := parseMinBps(w, r)
+	if !ok {
+		return
+	}
+	maxAge, ok := parseMaxAge(w, r)
+	if !ok {
+		return
+	}
+	minTier, ok := parseTier(w, r)
+	if !ok {
+		return
+	}
+	sp, err := s.Store.LatestSupply(r.Context(), r.PathValue("sac"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	reports, err := s.Store.LatestReports(r.Context(), r.PathValue("sac"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	covered, reason := coverage.CoverageStatus(sp, reports, minTier, s.Now(), minBps, maxAge)
+	writeJSON(w, http.StatusOK, map[string]any{"covered": covered, "reason": reason})
 }
 
 func (s *Server) reporters(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +376,48 @@ func parseLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+func parseBefore(w http.ResponseWriter, r *http.Request) (*uint32, bool) {
+	v := r.URL.Query().Get("before")
+	if v == "" {
+		return nil, true
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "before must be a ledger")
+		return nil, false
+	}
+	n32 := uint32(n)
+	return &n32, true
+}
+
+func parseMinBps(w http.ResponseWriter, r *http.Request) (uint32, bool) {
+	v := r.URL.Query().Get("min_bps")
+	if v == "" {
+		writeError(w, http.StatusBadRequest, "min_bps is required")
+		return 0, false
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "min_bps must be an integer between 0 and 10000")
+		return 0, false
+	}
+	return uint32(n), true
+}
+
+func parseMaxAge(w http.ResponseWriter, r *http.Request) (time.Duration, bool) {
+	v := r.URL.Query().Get("max_age")
+	if v == "" {
+		writeError(w, http.StatusBadRequest, "max_age is required")
+		return 0, false
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		writeError(w, http.StatusBadRequest, "max_age must be a positive duration (e.g. 24h)")
+		return 0, false
+	}
+	return d, true
 }
 
 func (s *Server) cors(next http.Handler) http.Handler {

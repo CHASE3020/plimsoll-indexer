@@ -214,13 +214,20 @@ func (s *Store) GetAsset(ctx context.Context, sac string) (coverage.Asset, error
 	return a, err
 }
 
-func (s *Store) SupplyHistory(ctx context.Context, sac string, limit int) ([]coverage.Supply, error) {
+func (s *Store) SupplyHistory(ctx context.Context, sac string, limit int, before *uint32) ([]coverage.Supply, *uint32, error) {
+	var beforeArg any
+	if before != nil {
+		v := int64(*before)
+		beforeArg = &v
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT amount::text, at_ledger, posted_at, breakdown_hash, poster, tx_hash, source
 		FROM supply_snapshots WHERE sac = $1
-		ORDER BY at_ledger DESC LIMIT $2`, sac, limit)
+		  AND ($2::bigint IS NULL OR at_ledger < $2)
+		ORDER BY at_ledger DESC, event_id DESC
+		LIMIT $3`, sac, beforeArg, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var out []coverage.Supply
@@ -229,30 +236,75 @@ func (s *Store) SupplyHistory(ctx context.Context, sac string, limit int) ([]cov
 		var amount string
 		var ledger int64
 		if err := rows.Scan(&amount, &ledger, &sp.PostedAt, &sp.BreakdownHash, &sp.Poster, &sp.TxHash, &sp.Source); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		sp.Amount = mustBig(amount)
 		sp.Ledger = uint32(ledger)
 		out = append(out, sp)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	var nextBefore *uint32
+	if len(out) == limit+1 {
+		out = out[:limit]
+		v := out[limit-1].Ledger
+		nextBefore = &v
+	}
+	return out, nextBefore, nil
 }
 
 // LatestSupply returns nil when nothing has been posted.
 func (s *Store) LatestSupply(ctx context.Context, sac string) (*coverage.Supply, error) {
-	h, err := s.SupplyHistory(ctx, sac, 1)
+	h, _, err := s.SupplyHistory(ctx, sac, 1, nil)
 	if err != nil || len(h) == 0 {
 		return nil, err
 	}
 	return &h[0], nil
 }
 
-func (s *Store) ReportHistory(ctx context.Context, sac string, limit int) ([]coverage.Report, error) {
-	return s.queryReports(ctx, `
-		SELECT tier, amount::text, as_of, posted_at, reporter, doc_hash, doc_uri, tx_hash, source,
+func (s *Store) ReportHistory(ctx context.Context, sac string, limit int, before *uint32) ([]coverage.Report, *uint32, error) {
+	var beforeArg any
+	if before != nil {
+		v := int64(*before)
+		beforeArg = &v
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT tier, amount::text, as_of, posted_at, posted_ledger, reporter, doc_hash, doc_uri, tx_hash, source,
 		       COALESCE(doc_check, '')
 		FROM reserve_reports WHERE sac = $1
-		ORDER BY posted_ledger DESC, as_of DESC LIMIT $2`, sac, limit)
+		  AND ($2::bigint IS NULL OR posted_ledger < $2)
+		ORDER BY posted_ledger DESC, as_of DESC, event_id DESC
+		LIMIT $3`, sac, beforeArg, limit+1)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var out []coverage.Report
+	var lastPostedLedger int64
+	for rows.Next() {
+		var r coverage.Report
+		var tier int16
+		var amount string
+		var postedLedger int64
+		if err := rows.Scan(&tier, &amount, &r.AsOf, &r.PostedAt, &postedLedger, &r.Reporter, &r.DocHash, &r.DocURI, &r.TxHash, &r.Source, &r.DocCheck); err != nil {
+			return nil, nil, err
+		}
+		r.Tier = uint32(tier)
+		r.Amount = mustBig(amount)
+		lastPostedLedger = postedLedger
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	var nextBefore *uint32
+	if len(out) == limit+1 {
+		out = out[:limit]
+		v := uint32(lastPostedLedger)
+		nextBefore = &v
+	}
+	return out, nextBefore, nil
 }
 
 // LatestReports returns the newest report (by as_of) for each tier.
