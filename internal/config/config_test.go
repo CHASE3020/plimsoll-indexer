@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKeepAwakeURL(t *testing.T) {
@@ -22,14 +24,16 @@ func TestKeepAwakeURL(t *testing.T) {
 	}
 }
 
+const testContract = "CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S"
+
 func setBase(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"NETWORK", "STELLAR_RPC_URL", "HORIZON_URL", "STELLAR_NETWORK_PASSPHRASE"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("DATABASE_URL", "postgres://x")
-	t.Setenv("COVERAGE_LEDGER_ID", "C1")
-	t.Setenv("REPORTER_REGISTRY_ID", "C2")
+	t.Setenv("COVERAGE_LEDGER_ID", testContract)
+	t.Setenv("REPORTER_REGISTRY_ID", testContract)
 }
 
 func TestNetworkPresets(t *testing.T) {
@@ -200,6 +204,121 @@ func TestLoadBadDurations(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err.Error(), v)
 			}
 		})
+	}
+}
+
+// TestLoadNonPositiveIntervals checks that a zero or negative interval fails
+// with a message naming the variable, instead of panicking in time.NewTicker.
+func TestLoadNonPositiveIntervals(t *testing.T) {
+	durationVars := []string{
+		"INGEST_INTERVAL",
+		"POST_INTERVAL",
+		"RECONCILE_INTERVAL",
+		"REPOST_AFTER",
+		"TOML_INTERVAL",
+		"KEEP_AWAKE_INTERVAL",
+	}
+	values := []string{"0", "-5s", "-0"}
+	for _, v := range durationVars {
+		for _, val := range values {
+			t.Run(fmt.Sprintf("%s=%s", v, val), func(t *testing.T) {
+				setBase(t)
+				t.Setenv(v, val)
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("Load() = nil error with %s=%s", v, val)
+				}
+				if !strings.Contains(err.Error(), v) {
+					t.Errorf("error = %q, want it to mention %q", err.Error(), v)
+				}
+			})
+		}
+	}
+}
+
+// TestLoadIntervalBelowFloor checks that intervals hitting external services
+// must be at least one second.
+func TestLoadIntervalBelowFloor(t *testing.T) {
+	setBase(t)
+	t.Setenv("INGEST_INTERVAL", "500ms")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "INGEST_INTERVAL") {
+		t.Fatalf("want INGEST_INTERVAL floor error, got %v", err)
+	}
+
+	// REPOST_AFTER is not polled on an external-service ticker, so it only
+	// needs to be positive.
+	setBase(t)
+	t.Setenv("INGEST_INTERVAL", "10s")
+	t.Setenv("REPOST_AFTER", "1ns")
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("REPOST_AFTER=1ns: %v", err)
+	}
+	if got.RepostAfter != time.Nanosecond {
+		t.Errorf("RepostAfter = %v, want 1ns", got.RepostAfter)
+	}
+}
+
+// TestLoadBadContractIDs checks that COVERAGE_LEDGER_ID and
+// REPORTER_REGISTRY_ID must be contract strkeys.
+func TestLoadBadContractIDs(t *testing.T) {
+	cases := []struct {
+		key, val string
+	}{
+		{"COVERAGE_LEDGER_ID", "not-a-contract"},
+		{"COVERAGE_LEDGER_ID", "GAUD..."},
+		{"REPORTER_REGISTRY_ID", "not-a-contract"},
+		{"REPORTER_REGISTRY_ID", "GC3..."},
+	}
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			setBase(t)
+			t.Setenv(c.key, c.val)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), c.key) {
+				t.Fatalf("want %q error, got %v", c.key, err)
+			}
+		})
+	}
+}
+
+// TestLoadBadURLs checks that RPC and Horizon URLs must be absolute http(s).
+func TestLoadBadURLs(t *testing.T) {
+	cases := []struct {
+		key, val string
+	}{
+		{"STELLAR_RPC_URL", "ftp://rpc.example.org"},
+		{"STELLAR_RPC_URL", "rpc.example.org"},
+		{"STELLAR_RPC_URL", "/relative"},
+		{"HORIZON_URL", "ftp://horizon.example.org"},
+		{"HORIZON_URL", "not-a-url"},
+		{"HORIZON_CHECK_URL", "htts://x.example.org"},
+	}
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			setBase(t)
+			t.Setenv(c.key, c.val)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), c.key) {
+				t.Fatalf("want %q error, got %v", c.key, err)
+			}
+		})
+	}
+}
+
+// TestLoadValidURLs checks that http and https URLs are accepted.
+func TestLoadValidURLs(t *testing.T) {
+	setBase(t)
+	t.Setenv("STELLAR_RPC_URL", "http://localhost:8000/rpc")
+	t.Setenv("HORIZON_URL", "https://horizon-testnet.stellar.org")
+	t.Setenv("HORIZON_CHECK_URL", "http://horizon-check:9001")
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RPCURL != "http://localhost:8000/rpc" || got.HorizonURL != "https://horizon-testnet.stellar.org" {
+		t.Errorf("unexpected: %+v", got)
 	}
 }
 
