@@ -62,9 +62,9 @@ The command fetches the asset's snapshot breakdown from the indexer, verifies th
 | `GET /v1/network` | Contract ids, RPC and Horizon URLs |
 | `GET /v1/assets?min_tier=1` | Every asset with latest supply, latest report per tier, coverage and stellar.toml data |
 | `GET /v1/assets/{sac}?min_tier=1` | One asset, same shape |
-| `GET /v1/assets/{sac}/supply?limit=100&before=90` | Supply snapshot history. Each row carries `source`: `event` for a figure decoded from a contract event, with the `tx_hash` that produced it, or `chain` for one recovered from contract state after an ingestion gap, where `tx_hash` is empty. The response includes `next_before` (the last row's ledger); pass it as `before` to fetch the next older page and walk the complete history. |
-| `GET /v1/assets/{sac}/reports?limit=100&before=40` | Reserve report history. The response includes `next_before` (the last row's posted ledger); pass it as `before` to fetch the next older page. |
-| `GET /v1/assets/{sac}/covered?min_bps=10000&max_age=24h` | `{covered, reason}` mirroring the contract's `is_covered`. `reason` is one of `covered`, `no_supply`, `no_report`, `stale_supply`, `stale_report`, `under_backed`. Optional `min_tier` (1-3, default 1). |
+| `HEAD /v1/assets/{sac}` | Status only, no response body: `200` if the asset is listed, `404` if not |
+| `GET /v1/assets/{sac}/supply?limit=100` | Supply snapshot history. Each row carries `source`: `event` for a figure decoded from a contract event, with the `tx_hash` that produced it, or `chain` for one recovered from contract state after an ingestion gap, where `tx_hash` is empty. |
+| `GET /v1/assets/{sac}/reports?limit=100` | Reserve report history |
 | `GET /v1/reporters` | Active registered reporters |
 | `GET /v1/breakdowns/{hash}` | Exact bytes of a supply breakdown |
 | `POST /v1/webhooks`, `GET /v1/webhooks`, `DELETE /v1/webhooks/{id}` | Manage authenticated issuer TOML change subscriptions |
