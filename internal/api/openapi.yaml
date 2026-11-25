@@ -112,6 +112,7 @@ paths:
           description: Stellar Asset Contract (SAC) address
           schema:
             type: string
+            pattern: '^C[A-Z2-7]{55}$'
             example: "CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S"
         - name: min_tier
           in: query
@@ -151,6 +152,7 @@ paths:
           description: Stellar Asset Contract (SAC) address
           schema:
             type: string
+            pattern: '^C[A-Z2-7]{55}$'
         - name: limit
           in: query
           required: false
@@ -186,7 +188,13 @@ paths:
                 required:
                   - supply
         '400':
-          description: Invalid limit or before parameter
+          description: Invalid limit parameter, or sac is not a contract strkey
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Asset not found
           content:
             application/json:
               schema:
@@ -202,6 +210,7 @@ paths:
           description: Stellar Asset Contract (SAC) address
           schema:
             type: string
+            pattern: '^C[A-Z2-7]{55}$'
         - name: limit
           in: query
           required: false
@@ -237,65 +246,13 @@ paths:
                 required:
                   - reports
         '400':
-          description: Invalid limit or before parameter
+          description: Invalid limit parameter, or sac is not a contract strkey
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /v1/assets/{sac}/covered:
-    get:
-      summary: Check whether an asset is covered per the contract's is_covered
-      operationId: getCovered
-      parameters:
-        - name: sac
-          in: path
-          required: true
-          description: Stellar Asset Contract (SAC) address
-          schema:
-            type: string
-        - name: min_bps
-          in: query
-          required: true
-          description: Minimum reserves/supply ratio in basis points (0-10000)
-          schema:
-            type: integer
-            minimum: 0
-            maximum: 10_000
-        - name: max_age
-          in: query
-          required: true
-          description: Maximum allowed age for both supply and report (e.g. 24h)
-          schema:
-            type: string
-            example: "24h"
-        - name: min_tier
-          in: query
-          required: false
-          description: Minimum tier level (1=transcribed, 2=issuer_signed, 3=auditor_signed)
-          schema:
-            type: integer
-            enum: [1, 2, 3]
-            default: 1
-      responses:
-        '200':
-          description: Coverage verdict and reason
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  covered:
-                    type: boolean
-                    example: true
-                  reason:
-                    type: string
-                    enum: [covered, no_supply, no_report, stale_supply, stale_report, under_backed]
-                    example: "covered"
-                required:
-                  - covered
-                  - reason
-        '400':
-          description: Invalid request parameter
+        '404':
+          description: Asset not found
           content:
             application/json:
               schema:
@@ -318,6 +275,85 @@ paths:
                       $ref: '#/components/schemas/Reporter'
                 required:
                   - reporters
+  /v1/webhooks:
+    post:
+      summary: Register an issuer TOML change webhook
+      operationId: createWebhook
+      security:
+        - WebhookAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  example: "https://example.com/plimsoll-hook"
+              required: [url]
+      responses:
+        '201':
+          description: Webhook created; secret is shown only in this response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedWebhook'
+        '400':
+          description: Invalid URL or request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid administrator token
+        '503':
+          description: Webhook management is not configured
+    get:
+      summary: List registered webhooks without their secrets
+      operationId: listWebhooks
+      security:
+        - WebhookAdminAuth: []
+      responses:
+        '200':
+          description: Registered webhook destinations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Webhook'
+                required: [webhooks]
+        '401':
+          description: Missing or invalid administrator token
+        '503':
+          description: Webhook management is not configured
+  /v1/webhooks/{id}:
+    delete:
+      summary: Delete a registered webhook
+      operationId: deleteWebhook
+      security:
+        - WebhookAdminAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '204':
+          description: Webhook deleted
+        '400':
+          description: Invalid webhook ID
+        '401':
+          description: Missing or invalid administrator token
+        '404':
+          description: Webhook not found
   /v1/breakdowns/{hash}:
     get:
       summary: Get raw supply breakdown by hash
@@ -326,9 +362,10 @@ paths:
         - name: hash
           in: path
           required: true
-          description: SHA-256 breakdown hash
+          description: SHA-256 breakdown hash, 64 hex characters
           schema:
             type: string
+            pattern: '^[0-9a-fA-F]{64}$'
       responses:
         '200':
           description: Raw JSON breakdown served verbatim
@@ -336,6 +373,12 @@ paths:
             application/json:
               schema:
                 type: object
+        '400':
+          description: Hash is not 64 hex characters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Breakdown hash not found
           content:
@@ -343,6 +386,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 components:
+  securitySchemes:
+    WebhookAdminAuth:
+      type: http
+      scheme: bearer
   schemas:
     NetworkInfo:
       type: object
@@ -554,6 +601,27 @@ components:
         - address
         - name
         - updated_at
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: integer
+        url:
+          type: string
+          format: uri
+        created_at:
+          type: string
+          format: date-time
+      required: [id, url, created_at]
+    CreatedWebhook:
+      allOf:
+        - $ref: '#/components/schemas/Webhook'
+        - type: object
+          properties:
+            secret:
+              type: string
+              description: Returned once; store it securely.
+          required: [secret]
     ErrorResponse:
       type: object
       properties:
