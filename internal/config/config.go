@@ -60,6 +60,7 @@ type Config struct {
 	IngestWorkers        int
 	PosterSecret         string
 	WebhookAdminToken    string
+	WebhookAPIKeys       []string
 	WebhookEncryptionKey string
 	SlackWebhookURL      string
 	DiscordWebhookURL    string
@@ -121,6 +122,14 @@ func Load() (Config, error) {
 		IngestWorkers:        2,
 		KeepAwakeURL:         keepAwakeURL(os.Getenv("KEEP_AWAKE_URL"), os.Getenv("RENDER_EXTERNAL_URL")),
 	}
+	if rawKeys := os.Getenv("WEBHOOK_API_KEYS"); rawKeys != "" {
+		keys, err := parseWebhookAPIKeys(rawKeys, c.WebhookAdminToken)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			c.WebhookAPIKeys = keys
+		}
+	}
 
 	if c.RPCURL == "" {
 		errs = append(errs, fmt.Errorf("STELLAR_RPC_URL is required for NETWORK=%s", network))
@@ -136,6 +145,9 @@ func Load() (Config, error) {
 	}
 	if (c.WebhookAdminToken == "") != (c.WebhookEncryptionKey == "") {
 		errs = append(errs, errors.New("WEBHOOK_ADMIN_TOKEN and WEBHOOK_ENCRYPTION_KEY must be configured together"))
+	}
+	if len(c.WebhookAPIKeys) > 0 && c.WebhookAdminToken == "" {
+		errs = append(errs, errors.New("WEBHOOK_API_KEYS requires WEBHOOK_ADMIN_TOKEN and WEBHOOK_ENCRYPTION_KEY"))
 	}
 	if c.WebhookEncryptionKey != "" {
 		key, err := base64.StdEncoding.DecodeString(c.WebhookEncryptionKey)
@@ -205,6 +217,23 @@ func Load() (Config, error) {
 	}
 
 	return c, errors.Join(errs...)
+}
+
+func parseWebhookAPIKeys(raw, adminToken string) ([]string, error) {
+	seen := map[string]struct{}{adminToken: {}}
+	var keys []string
+	for _, key := range strings.Split(raw, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return nil, errors.New("WEBHOOK_API_KEYS must contain unique, non-empty comma-separated keys")
+		}
+		if _, ok := seen[key]; ok {
+			return nil, errors.New("WEBHOOK_API_KEYS must contain unique, non-empty comma-separated keys")
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
 // keepAwakeURL picks the URL to ping: KEEP_AWAKE_URL if set ("none" turns
