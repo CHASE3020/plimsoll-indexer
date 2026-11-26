@@ -199,6 +199,10 @@ func run(cfg config.Config, log *slog.Logger) error {
 			Changelog: changes,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second, // Bounds the time clients can spend sending request bodies.
+		WriteTimeout:      30 * time.Second, // Closes connections when clients stall while receiving responses.
+		IdleTimeout:       60 * time.Second, // Reclaims keep-alive connections that are left idle.
+		MaxHeaderBytes:    1 << 20,          // Caps request headers at 1 MiB to limit per-connection memory use.
 	}
 	go func() {
 		<-ctx.Done()
