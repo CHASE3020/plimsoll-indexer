@@ -1,9 +1,46 @@
 package config
 
 import (
+	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
+
+func TestEnvExampleDocumentsLoadVariables(t *testing.T) {
+	configSource, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatalf("read config.go: %v", err)
+	}
+	envExample, err := os.ReadFile("../../.env.example")
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+
+	codeNames := regexp.MustCompile(`"([A-Z][A-Z0-9_]*)"`)
+	documentedNames := regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)=`)
+
+	documented := make(map[string]bool)
+	for _, match := range documentedNames.FindAllSubmatch(envExample, -1) {
+		documented[string(match[1])] = true
+	}
+
+	var missing []string
+	seen := make(map[string]bool)
+	for _, match := range codeNames.FindAllSubmatch(configSource, -1) {
+		name := string(match[1])
+		if !seen[name] && !documented[name] {
+			missing = append(missing, name)
+		}
+		seen[name] = true
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 {
+		t.Errorf("variables read by config.Load are missing from .env.example: %s", strings.Join(missing, ", "))
+	}
+}
 
 func TestKeepAwakeURL(t *testing.T) {
 	cases := []struct {
