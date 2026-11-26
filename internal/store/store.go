@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
@@ -325,6 +326,77 @@ const latestReportsSQL = `
 		ORDER BY as_of DESC
 		LIMIT 1
 	) AS r`
+
+type ReportExportCursor struct {
+	Ledger  int64
+	EventID string
+}
+
+type ReportExportRow struct {
+	Ledger    uint32
+	Timestamp time.Time
+	Reporter  string
+	Bps       *uint32
+	Tier      uint32
+	DocURI    string
+	Cursor    ReportExportCursor
+}
+
+// ReportExportPage returns one bounded page of report history in posting order.
+// The optional date bounds are inclusive dates represented as [from, to).
+func (s *Store) ReportExportPage(ctx context.Context, sac string, from, to *time.Time, after *ReportExportCursor, limit int) ([]ReportExportRow, error) {
+	var afterLedger *int64
+	var afterEventID *string
+	if after != nil {
+		afterLedger = &after.Ledger
+		afterEventID = &after.EventID
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT r.posted_ledger, r.event_id, r.posted_at, r.reporter, r.tier, r.doc_uri,
+		       r.amount::text, supply.amount::text
+		FROM reserve_reports r
+		LEFT JOIN LATERAL (
+		    SELECT amount FROM supply_snapshots
+		    WHERE sac = r.sac AND posted_at <= r.posted_at
+		    ORDER BY posted_at DESC, posted_ledger DESC, event_id DESC
+		    LIMIT 1
+		) supply ON true
+		WHERE r.sac = $1
+		  AND ($2::timestamptz IS NULL OR r.posted_at >= $2)
+		  AND ($3::timestamptz IS NULL OR r.posted_at < $3)
+		  AND ($4::bigint IS NULL OR (r.posted_ledger, r.event_id) > ($4, $5))
+		ORDER BY r.posted_ledger, r.event_id
+		LIMIT $6`, sac, from, to, afterLedger, afterEventID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query report export page: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ReportExportRow
+	for rows.Next() {
+		var row ReportExportRow
+		var ledger int64
+		var tier int16
+		var amount string
+		var supplyAmount pgtype.Text
+		if err := rows.Scan(&ledger, &row.Cursor.EventID, &row.Timestamp, &row.Reporter, &tier, &row.DocURI, &amount, &supplyAmount); err != nil {
+			return nil, fmt.Errorf("scan report export row: %w", err)
+		}
+		row.Ledger = uint32(ledger)
+		row.Tier = uint32(tier)
+		row.Cursor.Ledger = ledger
+		if supplyAmount.Valid {
+			bps := coverage.BPS(mustBig(amount), mustBig(supplyAmount.String))
+			row.Bps = &bps
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read report export page: %w", err)
+	}
+	return out, nil
+}
 
 // LatestReports returns the newest report (by as_of) for each tier.
 func (s *Store) LatestReports(ctx context.Context, sac string) (map[uint32]coverage.Report, error) {
