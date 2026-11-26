@@ -37,9 +37,9 @@ type Reader interface {
 	Ping(ctx context.Context) error
 	ListAssets(ctx context.Context) ([]coverage.Asset, error)
 	GetAsset(ctx context.Context, sac string) (coverage.Asset, error)
-	LatestSupply(ctx context.Context, sac string) (*coverage.Supply, error)
+	LatestSupplies(ctx context.Context, sacs []string) (map[string]*coverage.Supply, error)
 	SupplyHistory(ctx context.Context, sac string, limit int) ([]coverage.Supply, error)
-	LatestReports(ctx context.Context, sac string) (map[uint32]coverage.Report, error)
+	LatestReportsBySAC(ctx context.Context, sacs []string) (map[string]map[uint32]coverage.Report, error)
 	ReportHistory(ctx context.Context, sac string, limit int) ([]coverage.Report, error)
 	ReportExportPage(ctx context.Context, sac string, from, to *time.Time, after *store.ReportExportCursor, limit int) ([]store.ReportExportRow, error)
 	Reporters(ctx context.Context) ([]coverage.Reporter, error)
@@ -343,14 +343,23 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	if hasNext {
 		assets = assets[:limit]
 	}
+	sacs := make([]string, 0, len(assets))
+	for _, a := range assets {
+		sacs = append(sacs, a.SAC)
+	}
+	supplies, err := s.Store.LatestSupplies(r.Context(), sacs)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	reports, err := s.Store.LatestReportsBySAC(r.Context(), sacs)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	out := make([]assetJSON, 0, len(assets))
 	for _, a := range assets {
-		aj, err := s.assemble(r.Context(), a, minTier)
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-		out = append(out, aj)
+		out = append(out, s.assembleWithData(a, supplies[a.SAC], reports[a.SAC], minTier))
 	}
 	body := map[string]any{"assets": out}
 	if hasNext {
@@ -411,14 +420,18 @@ func (s *Server) headAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) assemble(ctx context.Context, a coverage.Asset, minTier uint32) (assetJSON, error) {
-	sp, err := s.Store.LatestSupply(ctx, a.SAC)
+	supplies, err := s.Store.LatestSupplies(ctx, []string{a.SAC})
 	if err != nil {
 		return assetJSON{}, err
 	}
-	reports, err := s.Store.LatestReports(ctx, a.SAC)
+	reportsBySAC, err := s.Store.LatestReportsBySAC(ctx, []string{a.SAC})
 	if err != nil {
 		return assetJSON{}, err
 	}
+	return s.assembleWithData(a, supplies[a.SAC], reportsBySAC[a.SAC], minTier), nil
+}
+
+func (s *Server) assembleWithData(a coverage.Asset, sp *coverage.Supply, reports map[uint32]coverage.Report, minTier uint32) assetJSON {
 	out := assetJSON{
 		Asset:         a,
 		Toml:          json.RawMessage("null"),
@@ -436,7 +449,7 @@ func (s *Server) assemble(ctx context.Context, a coverage.Asset, minTier uint32)
 	for tier, rep := range reports {
 		out.Reports[coverage.TierName(tier)] = toReport(rep)
 	}
-	return out, nil
+	return out
 }
 
 func (s *Server) supplyHistory(w http.ResponseWriter, r *http.Request) {

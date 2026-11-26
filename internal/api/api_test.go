@@ -43,16 +43,18 @@ func unlistedSAC(t *testing.T) string {
 }
 
 type fake struct {
-	assets        []coverage.Asset
-	supply        map[string]*coverage.Supply
-	reports       map[string]map[uint32]coverage.Report
-	bodies        map[string][]byte
-	exportPages   [][]store.ReportExportRow
-	exportCalls   int
-	exportFrom    *time.Time
-	exportTo      *time.Time
-	exportCursors []*store.ReportExportCursor
-	progress      map[string]store.Progress
+	assets           []coverage.Asset
+	supply           map[string]*coverage.Supply
+	reports          map[string]map[uint32]coverage.Report
+	bodies           map[string][]byte
+	batchSupplyCalls int
+	batchReportCalls int
+	exportPages      [][]store.ReportExportRow
+	exportCalls      int
+	exportFrom       *time.Time
+	exportTo         *time.Time
+	exportCursors    []*store.ReportExportCursor
+	progress         map[string]store.Progress
 }
 
 func (f *fake) Ping(context.Context) error { return nil }
@@ -67,8 +69,15 @@ func (f *fake) GetAsset(_ context.Context, s string) (coverage.Asset, error) {
 	}
 	return coverage.Asset{}, store.ErrNotFound
 }
-func (f *fake) LatestSupply(_ context.Context, s string) (*coverage.Supply, error) {
-	return f.supply[s], nil
+func (f *fake) LatestSupplies(_ context.Context, sacs []string) (map[string]*coverage.Supply, error) {
+	f.batchSupplyCalls++
+	out := make(map[string]*coverage.Supply)
+	for _, s := range sacs {
+		if sp := f.supply[s]; sp != nil {
+			out[s] = sp
+		}
+	}
+	return out, nil
 }
 func (f *fake) SupplyHistory(_ context.Context, s string, _ int) ([]coverage.Supply, error) {
 	if sp := f.supply[s]; sp != nil {
@@ -76,11 +85,15 @@ func (f *fake) SupplyHistory(_ context.Context, s string, _ int) ([]coverage.Sup
 	}
 	return nil, nil
 }
-func (f *fake) LatestReports(_ context.Context, s string) (map[uint32]coverage.Report, error) {
-	if r := f.reports[s]; r != nil {
-		return r, nil
+func (f *fake) LatestReportsBySAC(_ context.Context, sacs []string) (map[string]map[uint32]coverage.Report, error) {
+	f.batchReportCalls++
+	out := make(map[string]map[uint32]coverage.Report)
+	for _, s := range sacs {
+		if r := f.reports[s]; r != nil {
+			out[s] = r
+		}
 	}
-	return map[uint32]coverage.Report{}, nil
+	return out, nil
 }
 func (f *fake) ReportHistory(_ context.Context, s string, _ int) ([]coverage.Report, error) {
 	var out []coverage.Report
@@ -435,6 +448,35 @@ func TestListAndMisc(t *testing.T) {
 	}
 	if h["last_event_age_seconds"].(float64) != 90 {
 		t.Errorf("last_event_age_seconds = %v", h["last_event_age_seconds"])
+	}
+}
+
+func TestListAssetsUsesConstantBatchReads(t *testing.T) {
+	f := &fake{
+		assets: []coverage.Asset{
+			{SAC: sac, Code: "PUSD", Issuer: "GISS"},
+			{SAC: "CSAC2", Code: "USDC", Issuer: "GISS2"},
+			{SAC: "CSAC3", Code: "EUR", Issuer: "GISS3"},
+		},
+		supply:  map[string]*coverage.Supply{},
+		reports: map[string]map[uint32]coverage.Report{},
+		bodies:  map[string][]byte{},
+	}
+	s := &Server{
+		Store: f,
+		CORS:  []string{"*"},
+		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:   func() time.Time { return now },
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	list := get(t, srv, "/v1/assets", 200)
+	if len(list["assets"].([]any)) != 3 {
+		t.Fatalf("assets = %d, want 3", len(list["assets"].([]any)))
+	}
+	if f.batchSupplyCalls != 1 || f.batchReportCalls != 1 {
+		t.Fatalf("batch calls: supply=%d reports=%d, want 1 each", f.batchSupplyCalls, f.batchReportCalls)
 	}
 	get(t, srv, "/v1/assets/"+sac+"/supply?limit=0", 400)
 	get(t, srv, "/v1/assets/"+sac+"/reports", 200)

@@ -295,6 +295,78 @@ func (s *Store) LatestSupply(ctx context.Context, sac string) (*coverage.Supply,
 	return &h[0], nil
 }
 
+// LatestSupplies returns the newest supply snapshot for each requested SAC.
+func (s *Store) LatestSupplies(ctx context.Context, sacs []string) (map[string]*coverage.Supply, error) {
+	out := make(map[string]*coverage.Supply)
+	if len(sacs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (sac)
+		       sac, amount::text, at_ledger, posted_at, breakdown_hash, poster, tx_hash, source
+		FROM supply_snapshots
+		WHERE sac = ANY($1)
+		ORDER BY sac, at_ledger DESC`, sacs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sac string
+		var sp coverage.Supply
+		var amount string
+		var ledger int64
+		if err := rows.Scan(&sac, &amount, &ledger, &sp.PostedAt, &sp.BreakdownHash, &sp.Poster, &sp.TxHash, &sp.Source); err != nil {
+			return nil, err
+		}
+		sp.Amount = mustBig(amount)
+		sp.Ledger = uint32(ledger)
+		out[sac] = &sp
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LatestReportsBySAC returns the newest report for each tier of each requested SAC.
+func (s *Store) LatestReportsBySAC(ctx context.Context, sacs []string) (map[string]map[uint32]coverage.Report, error) {
+	out := make(map[string]map[uint32]coverage.Report)
+	if len(sacs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (sac, tier)
+		       sac, tier, amount::text, as_of, posted_at, reporter, doc_hash, doc_uri, tx_hash, source,
+		       COALESCE(doc_check, '')
+		FROM reserve_reports
+		WHERE sac = ANY($1)
+		ORDER BY sac, tier, as_of DESC`, sacs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sac string
+		var r coverage.Report
+		var tier int16
+		var amount string
+		if err := rows.Scan(&sac, &tier, &amount, &r.AsOf, &r.PostedAt, &r.Reporter, &r.DocHash, &r.DocURI, &r.TxHash, &r.Source, &r.DocCheck); err != nil {
+			return nil, err
+		}
+		r.Tier = uint32(tier)
+		r.Amount = mustBig(amount)
+		if out[sac] == nil {
+			out[sac] = make(map[uint32]coverage.Report)
+		}
+		out[sac][r.Tier] = r
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // reportHistorySQL returns one asset's reports newest-posted first. The
 // reserve_reports_sac_posted_ledger index (migration 0004) supplies that order,
 // so LIMIT stops the scan early instead of sorting the whole history.
@@ -407,6 +479,44 @@ func (s *Store) LatestReports(ctx context.Context, sac string) (map[uint32]cover
 	out := make(map[uint32]coverage.Report, len(list))
 	for _, r := range list {
 		out[r.Tier] = r
+	}
+	return out, nil
+}
+
+// LatestReportsBySAC returns the newest report for each tier of each requested SAC.
+func (s *Store) LatestReportsBySAC(ctx context.Context, sacs []string) (map[string]map[uint32]coverage.Report, error) {
+	out := make(map[string]map[uint32]coverage.Report)
+	if len(sacs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (sac, tier)
+		       sac, tier, amount::text, as_of, posted_at, reporter, doc_hash, doc_uri, tx_hash, source,
+		       COALESCE(doc_check, '')
+		FROM reserve_reports
+		WHERE sac = ANY($1)
+		ORDER BY sac, tier, as_of DESC`, sacs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sac string
+		var r coverage.Report
+		var tier int16
+		var amount string
+		if err := rows.Scan(&sac, &tier, &amount, &r.AsOf, &r.PostedAt, &r.Reporter, &r.DocHash, &r.DocURI, &r.TxHash, &r.Source, &r.DocCheck); err != nil {
+			return nil, err
+		}
+		r.Tier = uint32(tier)
+		r.Amount = mustBig(amount)
+		if out[sac] == nil {
+			out[sac] = make(map[uint32]coverage.Report)
+		}
+		out[sac][r.Tier] = r
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/plimsoll-protocol/plimsoll-indexer/internal/coverage"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/soroban"
 )
 
@@ -385,5 +386,69 @@ func TestEventIDMigrationRepairsLegacyTables(t *testing.T) {
 	}
 	if constraints != 2 {
 		t.Fatalf("created %d event ID constraints, want 2", constraints)
+	}
+}
+
+func TestLatestSuppliesAndReportsBySAC(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 25, 1, 0, 0, 0, time.UTC)
+
+	for _, supply := range []coverage.Supply{
+		{Amount: big.NewInt(100), Ledger: 10, PostedAt: at, BreakdownHash: "old", Poster: "G1"},
+		{Amount: big.NewInt(200), Ledger: 20, PostedAt: at.Add(time.Hour), BreakdownHash: "new", Poster: "G1"},
+	} {
+		if _, err := s.SaveChainSupply(ctx, "CSAC1", supply); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.SaveChainSupply(ctx, "CSAC2", coverage.Supply{
+		Amount: big.NewInt(300), Ledger: 30, PostedAt: at, BreakdownHash: "two", Poster: "G2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reports := []coverage.Report{
+		{Tier: coverage.TierIssuerSigned, Amount: big.NewInt(110), AsOf: at, PostedAt: at, Reporter: "G1", DocURI: "old"},
+		{Tier: coverage.TierIssuerSigned, Amount: big.NewInt(210), AsOf: at.Add(time.Hour), PostedAt: at.Add(time.Hour), Reporter: "G1", DocURI: "new"},
+		{Tier: coverage.TierAuditorSigned, Amount: big.NewInt(220), AsOf: at, PostedAt: at, Reporter: "G2", DocURI: "audit"},
+	}
+	for _, report := range reports {
+		if _, err := s.SaveChainReport(ctx, "CSAC1", report); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.SaveChainReport(ctx, "CSAC2", coverage.Report{
+		Tier: coverage.TierTranscribed, Amount: big.NewInt(290), AsOf: at, PostedAt: at, Reporter: "G3", DocURI: "two",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	supplies, err := s.LatestSupplies(ctx, []string{"CSAC1", "CSAC2", "CSAC3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if supplies["CSAC1"] == nil || supplies["CSAC1"].Ledger != 20 || supplies["CSAC1"].Amount.String() != "200" {
+		t.Fatalf("CSAC1 supply = %+v", supplies["CSAC1"])
+	}
+	if supplies["CSAC2"] == nil || supplies["CSAC2"].Ledger != 30 {
+		t.Fatalf("CSAC2 supply = %+v", supplies["CSAC2"])
+	}
+	if supplies["CSAC3"] != nil {
+		t.Fatalf("missing CSAC3 supply should be nil: %+v", supplies["CSAC3"])
+	}
+
+	bySAC, err := s.LatestReportsBySAC(ctx, []string{"CSAC1", "CSAC2", "CSAC3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bySAC["CSAC1"]) != 2 {
+		t.Fatalf("CSAC1 reports = %+v", bySAC["CSAC1"])
+	}
+	if got := bySAC["CSAC1"][coverage.TierIssuerSigned].Amount.String(); got != "210" {
+		t.Fatalf("latest issuer_signed amount = %q, want 210", got)
+	}
+	if len(bySAC["CSAC2"]) != 1 {
+		t.Fatalf("CSAC2 reports = %+v", bySAC["CSAC2"])
 	}
 }
