@@ -412,6 +412,92 @@ func TestListAndMisc(t *testing.T) {
 	get(t, srv, "/v1/assets/"+sac+"/reports", 200)
 }
 
+func TestAssetPagination(t *testing.T) {
+	f := &fake{
+		assets: []coverage.Asset{
+			{SAC: "C3", Code: "USDX", Issuer: "G3"},
+			{SAC: "C1", Code: "PUSD", Issuer: "G1"},
+			{SAC: "C5", Code: "USDX", Issuer: "G5"},
+			{SAC: "C2", Code: "PUSD", Issuer: "G2"},
+			{SAC: "C4", Code: "USDX", Issuer: "G4"},
+		},
+		supply:  map[string]*coverage.Supply{},
+		reports: map[string]map[uint32]coverage.Report{},
+		bodies:  map[string][]byte{},
+	}
+	s := &Server{
+		Store: f, CORS: []string{"*"},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now: func() time.Time { return now },
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	seen := make(map[string]int)
+	cursor := ""
+	pages := 0
+	for {
+		path := "/v1/assets?limit=2"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		body := get(t, srv, path, 200)
+		pages++
+		assets := body["assets"].([]any)
+		if len(assets) == 0 {
+			break
+		}
+		for _, raw := range assets {
+			asset := raw.(map[string]any)
+			code := asset["code"].(string)
+			issuer := asset["issuer"].(string)
+			seen[code+"/"+issuer]++
+		}
+		next, hasNext := body["next_cursor"].(string)
+		if !hasNext {
+			break
+		}
+		cursor = next
+	}
+	if pages != 3 {
+		t.Fatalf("pages = %d, want 3", pages)
+	}
+	for _, key := range []string{"PUSD/G1", "PUSD/G2", "USDX/G3", "USDX/G4", "USDX/G5"} {
+		if seen[key] != 1 {
+			t.Errorf("%s returned %d times", key, seen[key])
+		}
+	}
+
+	first := get(t, srv, "/v1/assets?limit=2", 200)
+	if len(first["assets"].([]any)) != 2 || first["next_cursor"] == nil {
+		t.Fatalf("first page = %+v", first)
+	}
+	cursor = first["next_cursor"].(string)
+	middle := get(t, srv, "/v1/assets?limit=2&cursor="+cursor, 200)
+	if len(middle["assets"].([]any)) != 2 || middle["next_cursor"] == nil {
+		t.Fatalf("middle page = %+v", middle)
+	}
+	cursor = middle["next_cursor"].(string)
+	last := get(t, srv, "/v1/assets?limit=2&cursor="+cursor, 200)
+	if len(last["assets"].([]any)) != 1 || last["next_cursor"] != nil {
+		t.Fatalf("last page = %+v", last)
+	}
+
+	empty := &fake{assets: nil, supply: map[string]*coverage.Supply{}, reports: map[string]map[uint32]coverage.Report{}, bodies: map[string][]byte{}}
+	emptyServer := &Server{Store: empty, CORS: []string{"*"}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return now }}
+	emptySrv := httptest.NewServer(emptyServer.Handler())
+	defer emptySrv.Close()
+	emptyBody := get(t, emptySrv, "/v1/assets?limit=50", 200)
+	if got := len(emptyBody["assets"].([]any)); got != 0 || emptyBody["next_cursor"] != nil {
+		t.Fatalf("empty page = %+v", emptyBody)
+	}
+
+	get(t, srv, "/v1/assets?limit=0", 400)
+	get(t, srv, "/v1/assets?limit=201", 400)
+	get(t, srv, "/v1/assets?limit=nope", 400)
+	get(t, srv, "/v1/assets?cursor=not-a-cursor", 400)
+}
+
 func TestBreakdownServedVerbatim(t *testing.T) {
 	srv := server()
 	defer srv.Close()

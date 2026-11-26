@@ -227,6 +227,32 @@ func (s *Store) ListAssets(ctx context.Context) ([]coverage.Asset, error) {
 	return out, rows.Err()
 }
 
+// ListAssetsPage returns rows ordered by (code, issuer). The API requests
+// one extra row to determine whether another page exists.
+func (s *Store) ListAssetsPage(ctx context.Context, limit int, afterCode, afterIssuer string) ([]coverage.Asset, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+assetCols+`
+		FROM assets
+		WHERE ($1 = '' AND $2 = '')
+		   OR code > $1
+		   OR (code = $1 AND issuer > $2)
+		ORDER BY code, issuer
+		LIMIT $3`, afterCode, afterIssuer, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []coverage.Asset
+	for rows.Next() {
+		a, err := scanAsset(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetAsset(ctx context.Context, sac string) (coverage.Asset, error) {
 	a, err := scanAsset(s.pool.QueryRow(ctx, `SELECT `+assetCols+` FROM assets WHERE sac = $1`, sac))
 	if errors.Is(err, pgx.ErrNoRows) {

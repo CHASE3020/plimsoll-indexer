@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +43,16 @@ type Reader interface {
 	Reporters(ctx context.Context) ([]coverage.Reporter, error)
 	Breakdown(ctx context.Context, hash string) ([]byte, error)
 	Progress(ctx context.Context, name string) (store.Progress, error)
+}
+
+type assetPageReader interface {
+	ListAssetsPage(ctx context.Context, limit int, afterCode, afterIssuer string) ([]coverage.Asset, error)
+}
+
+type assetCursor struct {
+	Version int    `json:"v"`
+	Code    string `json:"code"`
+	Issuer  string `json:"issuer"`
 }
 
 // NetworkInfo is served at /v1/network so clients can discover contract ids.
@@ -268,10 +280,56 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	assets, err := s.Store.ListAssets(r.Context())
+	limit, ok := parseAssetLimit(w, r)
+	if !ok {
+		return
+	}
+	cursor, ok := parseAssetCursor(w, r)
+	if !ok {
+		return
+	}
+
+	var assets []coverage.Asset
+	var err error
+	if pageStore, ok := s.Store.(assetPageReader); ok {
+		afterCode, afterIssuer := "", ""
+		if cursor != nil {
+			afterCode, afterIssuer = cursor.Code, cursor.Issuer
+		}
+		assets, err = pageStore.ListAssetsPage(r.Context(), limit+1, afterCode, afterIssuer)
+	} else {
+		all, listErr := s.Store.ListAssets(r.Context())
+		if listErr != nil {
+			err = listErr
+		} else {
+			sortAssets(all)
+			start := 0
+			if cursor != nil {
+				for i := range all {
+					if all[i].Code > cursor.Code ||
+						(all[i].Code == cursor.Code && all[i].Issuer > cursor.Issuer) {
+						start = i
+						break
+					}
+					if i == len(all)-1 {
+						start = len(all)
+					}
+				}
+			}
+			end := start + limit + 1
+			if end > len(all) {
+				end = len(all)
+			}
+			assets = all[start:end]
+		}
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	hasNext := len(assets) > limit
+	if hasNext {
+		assets = assets[:limit]
 	}
 	out := make([]assetJSON, 0, len(assets))
 	for _, a := range assets {
@@ -282,7 +340,16 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, aj)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"assets": out})
+	body := map[string]any{"assets": out}
+	if hasNext {
+		last := assets[len(assets)-1]
+		body["next_cursor"] = encodeAssetCursor(assetCursor{
+			Version: 1,
+			Code:    last.Code,
+			Issuer:  last.Issuer,
+		})
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
@@ -687,6 +754,58 @@ func parseTier(w http.ResponseWriter, r *http.Request) (uint32, bool) {
 		return 0, false
 	}
 	return uint32(n), true
+}
+
+func parseAssetLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return 50, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 200 {
+		writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+		return 0, false
+	}
+	return n, true
+}
+
+func parseAssetCursor(w http.ResponseWriter, r *http.Request) (*assetCursor, bool) {
+	v := r.URL.Query().Get("cursor")
+	if v == "" {
+		return nil, true
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(v)
+	if err != nil || base64.RawURLEncoding.EncodeToString(raw) != v {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return nil, false
+	}
+	var cursor assetCursor
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cursor); err != nil || cursor.Version != 1 || cursor.Code == "" || cursor.Issuer == "" {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return nil, false
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return nil, false
+	}
+	return &cursor, true
+}
+
+func encodeAssetCursor(cursor assetCursor) string {
+	raw, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func sortAssets(assets []coverage.Asset) {
+	sort.Slice(assets, func(i, j int) bool {
+		if assets[i].Code != assets[j].Code {
+			return assets[i].Code < assets[j].Code
+		}
+		return assets[i].Issuer < assets[j].Issuer
+	})
 }
 
 func parseLimit(w http.ResponseWriter, r *http.Request) (int, bool) {

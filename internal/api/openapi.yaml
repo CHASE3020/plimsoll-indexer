@@ -75,6 +75,21 @@ paths:
             type: integer
             enum: [1, 2, 3]
             default: 1
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of assets to return (1-200)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor returned as next_cursor by a previous page
+          schema:
+            type: string
       responses:
         '200':
           description: List of tracked assets
@@ -87,6 +102,9 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Asset'
+                  next_cursor:
+                    type: string
+                    description: Opaque cursor for the next page, present only when another page exists
                 required:
                   - assets
         '400':

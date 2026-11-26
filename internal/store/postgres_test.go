@@ -161,6 +161,40 @@ func testPool(t *testing.T, url string) *pgxpool.Pool {
 	return p
 }
 
+func TestAssetPaginationKeyset(t *testing.T) {
+	s, url := openStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 25, 2, 0, 0, 0, time.UTC)
+	for i, asset := range []struct {
+		sac, code, issuer string
+	}{
+		{"C1", "PUSD", "G1"},
+		{"C2", "PUSD", "G2"},
+		{"C3", "USDX", "G3"},
+		{"C4", "USDX", "G4"},
+		{"C5", "USDX", "G5"},
+	} {
+		execSQL(t, url, `
+			INSERT INTO assets (sac, code, issuer, listed_ledger, listed_at, event_id)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			asset.sac, asset.code, asset.issuer, i+1, at, fmt.Sprintf("listed-%d", i))
+	}
+
+	first, err := s.ListAssetsPage(ctx, 3, "", "")
+	if err != nil || len(first) != 3 ||
+		first[0].Code != "PUSD" || first[1].Issuer != "G2" || first[2].Issuer != "G3" {
+		t.Fatalf("first page = %+v, err=%v", first, err)
+	}
+	middle, err := s.ListAssetsPage(ctx, 3, first[2].Code, first[2].Issuer)
+	if err != nil || len(middle) != 2 || middle[0].Issuer != "G4" || middle[1].Issuer != "G5" {
+		t.Fatalf("middle page = %+v, err=%v", middle, err)
+	}
+	last, err := s.ListAssetsPage(ctx, 3, middle[1].Code, middle[1].Issuer)
+	if err != nil || len(last) != 0 {
+		t.Fatalf("last page = %+v, err=%v", last, err)
+	}
+}
+
 func TestIssuerTomlSnapshotsDetectChanges(t *testing.T) {
 	s, _ := openStore(t)
 	ctx := context.Background()

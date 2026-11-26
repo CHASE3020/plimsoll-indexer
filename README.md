@@ -60,7 +60,7 @@ The command fetches the asset's snapshot breakdown from the indexer, verifies th
 | --- | --- |
 | `GET /healthz` | `{status, ingested_to_ledger, last_event_ledger, last_event_at, last_event_age_seconds}` |
 | `GET /v1/network` | Contract ids, RPC and Horizon URLs |
-| `GET /v1/assets?min_tier=1` | Every asset with latest supply, latest report per tier, coverage and stellar.toml data |
+| `GET /v1/assets?limit=50&cursor=<opaque>&min_tier=1` | Paginated assets (default limit 50, maximum 200) with latest supply, latest report per tier, coverage and stellar.toml data. Responses include `next_cursor` while another page exists. |
 | `GET /v1/assets/{sac}?min_tier=1` | One asset, same shape |
 | `HEAD /v1/assets/{sac}` | Status only, no response body: `200` if the asset is listed, `404` if not |
 | `GET /v1/assets/{sac}/supply?limit=100` | Supply snapshot history. Each row carries `source`: `event` for a figure decoded from a contract event, with the `tx_hash` that produced it, or `chain` for one recovered from contract state after an ingestion gap, where `tx_hash` is empty. |
