@@ -57,6 +57,7 @@ type Config struct {
 	CoverageLedgerID     string
 	ReporterRegistryID   string
 	StartLedger          uint32
+	IngestWorkers        int
 	PosterSecret         string
 	WebhookAdminToken    string
 	WebhookEncryptionKey string
@@ -117,6 +118,7 @@ func Load() (Config, error) {
 		SlackWebhookURL:      os.Getenv("SLACK_WEBHOOK_URL"),
 		DiscordWebhookURL:    os.Getenv("DISCORD_WEBHOOK_URL"),
 		LogLevel:             envOr("LOG_LEVEL", "info"),
+		IngestWorkers:        2,
 		KeepAwakeURL:         keepAwakeURL(os.Getenv("KEEP_AWAKE_URL"), os.Getenv("RENDER_EXTERNAL_URL")),
 	}
 
@@ -147,6 +149,13 @@ func Load() (Config, error) {
 		errs = append(errs, fmt.Errorf("START_LEDGER: %w", err))
 	}
 	c.StartLedger = uint32(start)
+
+	workers, err := strconv.Atoi(envOr("INGEST_WORKERS", "2"))
+	if err != nil || workers < 1 {
+		errs = append(errs, errors.New("INGEST_WORKERS must be a positive integer"))
+	} else {
+		c.IngestWorkers = workers
+	}
 
 	durations := []struct {
 		name string
