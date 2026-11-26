@@ -35,6 +35,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(runHealthcheck())
 	}
+	if len(os.Args) > 1 && os.Args[1] == "keygen" {
+		os.Exit(runKeygenCommand(os.Args[2:]))
+	}
 
 	cfg, err := config.Load()
 	log := newLogger(cfg.LogLevel)
