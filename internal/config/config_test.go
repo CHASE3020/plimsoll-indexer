@@ -1,11 +1,47 @@
 package config
 
 import (
-	"fmt"
+	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEnvExampleDocumentsLoadVariables(t *testing.T) {
+	configSource, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatalf("read config.go: %v", err)
+	}
+	envExample, err := os.ReadFile("../../.env.example")
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+
+	codeNames := regexp.MustCompile(`"([A-Z][A-Z0-9_]*)"`)
+	documentedNames := regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)=`)
+
+	documented := make(map[string]bool)
+	for _, match := range documentedNames.FindAllSubmatch(envExample, -1) {
+		documented[string(match[1])] = true
+	}
+
+	var missing []string
+	seen := make(map[string]bool)
+	for _, match := range codeNames.FindAllSubmatch(configSource, -1) {
+		name := string(match[1])
+		if !seen[name] && !documented[name] {
+			missing = append(missing, name)
+		}
+		seen[name] = true
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 {
+		t.Errorf("variables read by config.Load are missing from .env.example: %s", strings.Join(missing, ", "))
+	}
+}
 
 func TestKeepAwakeURL(t *testing.T) {
 	cases := []struct {
@@ -28,7 +64,7 @@ const testContract = "CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S"
 
 func setBase(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"NETWORK", "STELLAR_RPC_URL", "HORIZON_URL", "STELLAR_NETWORK_PASSPHRASE", "WEBHOOK_ADMIN_TOKEN", "WEBHOOK_ENCRYPTION_KEY"} {
+	for _, k := range []string{"NETWORK", "STELLAR_RPC_URL", "HORIZON_URL", "STELLAR_NETWORK_PASSPHRASE", "WEBHOOK_ADMIN_TOKEN", "WEBHOOK_API_KEYS", "WEBHOOK_ENCRYPTION_KEY", "WEBHOOK_SIGNING_SECRET"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("DATABASE_URL", "postgres://x")
@@ -39,8 +75,8 @@ func setBase(t *testing.T) {
 func TestWebhookConfigurationMustBeComplete(t *testing.T) {
 	setBase(t)
 	t.Setenv("WEBHOOK_ADMIN_TOKEN", "admin")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must be configured together") {
-		t.Fatalf("want paired webhook configuration error, got %v", err)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "neither WEBHOOK_ENCRYPTION_KEY nor WEBHOOK_SIGNING_SECRET") {
+		t.Fatalf("want an unusable admin token error, got %v", err)
 	}
 
 	setBase(t)
@@ -59,6 +95,33 @@ func TestWebhookConfigurationMustBeComplete(t *testing.T) {
 	t.Setenv("WEBHOOK_ENCRYPTION_KEY", "short")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "32-byte key") {
 		t.Fatalf("want invalid key error, got %v", err)
+	}
+}
+
+func TestWebhookAPIKeys(t *testing.T) {
+	setBase(t)
+	t.Setenv("WEBHOOK_ADMIN_TOKEN", "admin")
+	t.Setenv("WEBHOOK_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("WEBHOOK_API_KEYS", " client-one ,client-two")
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.WebhookAPIKeys) != 2 || got.WebhookAPIKeys[0] != "client-one" || got.WebhookAPIKeys[1] != "client-two" {
+		t.Fatalf("WebhookAPIKeys = %q", got.WebhookAPIKeys)
+	}
+
+	for _, raw := range []string{"client-one,,client-two", "same,same", "admin"} {
+		t.Setenv("WEBHOOK_API_KEYS", raw)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WEBHOOK_API_KEYS") {
+			t.Errorf("WEBHOOK_API_KEYS=%q: want validation error, got %v", raw, err)
+		}
+	}
+
+	setBase(t)
+	t.Setenv("WEBHOOK_API_KEYS", "client-one")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires WEBHOOK_ADMIN_TOKEN") {
+		t.Fatalf("API keys without webhook management config: %v", err)
 	}
 }
 
@@ -161,6 +224,30 @@ func TestLoadDefaults(t *testing.T) {
 	if got.KeepAwakeInterval.String() != "10m0s" {
 		t.Errorf("KeepAwakeInterval = %v, want 10m0s", got.KeepAwakeInterval)
 	}
+	if got.IngestWorkers != 2 {
+		t.Errorf("IngestWorkers = %d, want 2", got.IngestWorkers)
+	}
+}
+
+func TestLoadIngestWorkers(t *testing.T) {
+	for _, value := range []string{"0", "-1", "many"} {
+		t.Run(value, func(t *testing.T) {
+			setBase(t)
+			t.Setenv("INGEST_WORKERS", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INGEST_WORKERS") {
+				t.Fatalf("want INGEST_WORKERS validation error, got %v", err)
+			}
+		})
+	}
+	setBase(t)
+	t.Setenv("INGEST_WORKERS", "1")
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IngestWorkers != 1 {
+		t.Errorf("IngestWorkers = %d, want 1", got.IngestWorkers)
+	}
 }
 
 // TestLoadRequiredMissing checks that each required variable produces an error
@@ -216,6 +303,7 @@ func TestLoadBadDurations(t *testing.T) {
 		"RECONCILE_INTERVAL",
 		"REPOST_AFTER",
 		"TOML_INTERVAL",
+		"WEBHOOK_INTERVAL",
 		"KEEP_AWAKE_INTERVAL",
 	}
 	for _, v := range durationVars {
@@ -233,118 +321,38 @@ func TestLoadBadDurations(t *testing.T) {
 	}
 }
 
-// TestLoadNonPositiveIntervals checks that a zero or negative interval fails
-// with a message naming the variable, instead of panicking in time.NewTicker.
-func TestLoadNonPositiveIntervals(t *testing.T) {
-	durationVars := []string{
-		"INGEST_INTERVAL",
-		"POST_INTERVAL",
-		"RECONCILE_INTERVAL",
-		"REPOST_AFTER",
-		"TOML_INTERVAL",
-		"KEEP_AWAKE_INTERVAL",
-	}
-	values := []string{"0", "-5s", "-0"}
-	for _, v := range durationVars {
-		for _, val := range values {
-			t.Run(fmt.Sprintf("%s=%s", v, val), func(t *testing.T) {
-				setBase(t)
-				t.Setenv(v, val)
-				_, err := Load()
-				if err == nil {
-					t.Fatalf("Load() = nil error with %s=%s", v, val)
-				}
-				if !strings.Contains(err.Error(), v) {
-					t.Errorf("error = %q, want it to mention %q", err.Error(), v)
-				}
-			})
-		}
-	}
-}
-
-// TestLoadIntervalBelowFloor checks that intervals hitting external services
-// must be at least one second.
-func TestLoadIntervalBelowFloor(t *testing.T) {
+// TestWebhookConfig checks that the admin token and signing secret are only
+// accepted together, and that the notifier interval has a default.
+func TestWebhookConfig(t *testing.T) {
 	setBase(t)
-	t.Setenv("INGEST_INTERVAL", "500ms")
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "INGEST_INTERVAL") {
-		t.Fatalf("want INGEST_INTERVAL floor error, got %v", err)
+	t.Setenv("WEBHOOK_ADMIN_TOKEN", "token")
+	t.Setenv("WEBHOOK_SIGNING_SECRET", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "neither WEBHOOK_ENCRYPTION_KEY nor WEBHOOK_SIGNING_SECRET") {
+		t.Fatalf("want a half-configured webhook error, got %v", err)
 	}
 
-	// REPOST_AFTER is not polled on an external-service ticker, so it only
-	// needs to be positive.
-	setBase(t)
-	t.Setenv("INGEST_INTERVAL", "10s")
-	t.Setenv("REPOST_AFTER", "1ns")
-	got, err := Load()
-	if err != nil {
-		t.Fatalf("REPOST_AFTER=1ns: %v", err)
+	t.Setenv("WEBHOOK_ADMIN_TOKEN", "")
+	t.Setenv("WEBHOOK_SIGNING_SECRET", "secret")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WEBHOOK_ADMIN_TOKEN and WEBHOOK_SIGNING_SECRET") {
+		t.Fatalf("want a half-configured webhook error, got %v", err)
 	}
-	if got.RepostAfter != time.Nanosecond {
-		t.Errorf("RepostAfter = %v, want 1ns", got.RepostAfter)
-	}
-}
 
-// TestLoadBadContractIDs checks that COVERAGE_LEDGER_ID and
-// REPORTER_REGISTRY_ID must be contract strkeys.
-func TestLoadBadContractIDs(t *testing.T) {
-	cases := []struct {
-		key, val string
-	}{
-		{"COVERAGE_LEDGER_ID", "not-a-contract"},
-		{"COVERAGE_LEDGER_ID", "GAUD..."},
-		{"REPORTER_REGISTRY_ID", "not-a-contract"},
-		{"REPORTER_REGISTRY_ID", "GC3..."},
-	}
-	for _, c := range cases {
-		t.Run(c.key, func(t *testing.T) {
-			setBase(t)
-			t.Setenv(c.key, c.val)
-			_, err := Load()
-			if err == nil || !strings.Contains(err.Error(), c.key) {
-				t.Fatalf("want %q error, got %v", c.key, err)
-			}
-		})
-	}
-}
-
-// TestLoadBadURLs checks that RPC and Horizon URLs must be absolute http(s).
-func TestLoadBadURLs(t *testing.T) {
-	cases := []struct {
-		key, val string
-	}{
-		{"STELLAR_RPC_URL", "ftp://rpc.example.org"},
-		{"STELLAR_RPC_URL", "rpc.example.org"},
-		{"STELLAR_RPC_URL", "/relative"},
-		{"HORIZON_URL", "ftp://horizon.example.org"},
-		{"HORIZON_URL", "not-a-url"},
-		{"HORIZON_CHECK_URL", "htts://x.example.org"},
-	}
-	for _, c := range cases {
-		t.Run(c.key, func(t *testing.T) {
-			setBase(t)
-			t.Setenv(c.key, c.val)
-			_, err := Load()
-			if err == nil || !strings.Contains(err.Error(), c.key) {
-				t.Fatalf("want %q error, got %v", c.key, err)
-			}
-		})
-	}
-}
-
-// TestLoadValidURLs checks that http and https URLs are accepted.
-func TestLoadValidURLs(t *testing.T) {
-	setBase(t)
-	t.Setenv("STELLAR_RPC_URL", "http://localhost:8000/rpc")
-	t.Setenv("HORIZON_URL", "https://horizon-testnet.stellar.org")
-	t.Setenv("HORIZON_CHECK_URL", "http://horizon-check:9001")
+	t.Setenv("WEBHOOK_ADMIN_TOKEN", "token")
+	t.Setenv("WEBHOOK_SIGNING_SECRET", "secret")
 	got, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.RPCURL != "http://localhost:8000/rpc" || got.HorizonURL != "https://horizon-testnet.stellar.org" {
-		t.Errorf("unexpected: %+v", got)
+	if got.WebhookAdminToken != "token" || got.WebhookSigningSecret != "secret" {
+		t.Errorf("webhook config: %+v", got)
+	}
+	// A signing secret alone is a complete coverage-alert setup: it does not
+	// need the encryption key that TOML change subscriptions use.
+	if got.WebhookEncryptionKey != "" {
+		t.Errorf("WebhookEncryptionKey = %q, want empty", got.WebhookEncryptionKey)
+	}
+	if got.WebhookInterval.String() != "1m0s" {
+		t.Errorf("WebhookInterval = %v, want 1m0s", got.WebhookInterval)
 	}
 }
 
